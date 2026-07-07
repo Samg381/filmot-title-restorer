@@ -4,82 +4,157 @@
 // @version      0.49
 // @license GPL-3.0-or-later; https://www.gnu.org/licenses/gpl-3.0.txt
 // @description  Restores titles for removed or private videos in YouTube playlists
-// @author       Jopik
+// @author       Jopik, Samg381
 // @match        https://*.youtube.com/*
-// @noframes
 // @icon         https://www.google.com/s2/favicons?domain=filmot.com
+// @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @connect      web.archive.org
 // @require      https://cdnjs.cloudflare.com/ajax/libs/cash/8.1.5/cash.min.js
-// @downloadURL https://update.greasyfork.org/scripts/430202/Filmot%20Title%20Restorer.user.js
-// @updateURL https://update.greasyfork.org/scripts/430202/Filmot%20Title%20Restorer.meta.js
 // ==/UserScript==
+
+if (window.trustedTypes) {
+    window.trustedTypes.createPolicy('default', {createHTML: (string, sink) => string})
+}
+
+// STATIC VALUES ===============================================================================================================
 
 var darkModeBackground="#000099";
 var lightModeBackground="#b0f2f4";
 var darkModeLinkColor="#f1f1f1";
 
-//console.log("Starting filmot title restorer");
-document.addEventListener('yt-navigate-start', handleNavigateStart);
-document.addEventListener('yt-navigate-finish', handleNavigateFinish);
-document.addEventListener( 'yt-action', handlePageDataLoad );
-//console.log("addEventListener completed");
 
-// Fire at least once on load, sometimes handleNavigateFinish on first load yt-navigate-finish already fired before script loads
-//handleNavigateFinish();
 
-/* UTILITY */
+
+
+
+// UTILITY FUNCTIONS ===========================================================================================================
+
 function escapeHTML(unsafe) {
     return unsafe.replace(
         /[\u0000-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u00FF]/g,
         c => '&#' + ('000' + c.charCodeAt(0)).substr(-4, 4) + ';'
     )
 }
+
 function getWaybackVideoAvailabilityCheckURL(videoID) {
     return `https://web.archive.org/cdx/search/cdx?url=wayback-fakeurl.archive.org/yt/${videoID}&fl=timestamp,original&output=json&closest=20050101000000&limit=1`;
 }
+
 function waybackTimestampToDateString(timestamp) {
     return `${timestamp.slice(6, 8)}.${timestamp.slice(4, 6)}.${timestamp.slice(0, 4)}`;
 }
 
-function handlePageDataLoad(event){
-    //console.log("handlePageDataLoad");
-    //console.log(event);
-    if (event.detail!=null && event.detail.actionName!=null && event.detail.actionName.indexOf("yt-window-scrolled")>=0) {
-        if (window.location.href.indexOf("/playlist?")>0)
-        {
-            extractIDsFullView();
-        }
-    }
+function reportAJAXError(error) {
+    alert("[Filmot] Error fetching API results " + error);
 }
 
+function rgb2lum(rgb) {
+    // calculate relative luminance of a color provided by rgb() string
+    // black is 0, white is 1
+    rgb = rgb.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
+    if (rgb.length==4) {
+        var R=parseInt(rgb[1],10)/255.0;
+        var G=parseInt(rgb[2],10)/255.0;
+        var B=parseInt(rgb[3],10)/255.0;
+        return 0.2126*R + 0.7152*G + 0.0722*B;
+    }
+    return 1;
+}
+
+
+
+
+
+
+
+
+// LISTENERS / FIRING LOGIC ====================================================================================================
+
+document.addEventListener('yt-navigate-start', handleNavigateStart); // Detects when the page begins loading
+
+document.addEventListener('yt-navigate-finish', handleNavigateFinish); // Detects when the page finishes loading
+
+document.addEventListener("yt-action", e => { // Detects when scrolling causes new entries to appear (playlist page)
+    if (e.detail?.actionName === "yt-store-grafted-ve-action") {
+        handlePageDataLoad(e);
+    }
+});
+
+// Fire at least once on load, sometimes handleNavigateFinish on first load yt-navigate-finish already fired before script loads
+handleNavigateFinish();
+
+
+
+
+
+
+
+
+
+
+
+// DISPATCHERS =================================================================================================================
+
 function handleNavigateStart() {
-    //console.log("handleNavigateStart");
+
     var filmotTitles=$(".filmot_title");
     filmotTitles.text("");
     filmotTitles.removeClass("filmot_title");
+
     var filmotChannels=$(".filmot_channel");
     filmotChannels.text("");
     filmotChannels.attr("onclick","");
     filmotChannels.removeClass("filmot_channel");
+
     cleanUP();
 }
 
+
 function handleNavigateFinish() {
-    //console.log("handleNavigateFinish");
+
     cleanUP();
 
     if (window.location.href.indexOf("/playlist?")>0)
     {
+        console.log('[Filmot] Filmot Title Restorer loaded on playlist page.');
         setTimeout(extractIDsFullView, 500);
     }
     else if (window.location.href.indexOf("/watch?")>0)
     {
+        console.log('[Filmot] Filmot Title Restorer loaded on single video page.');
         setTimeout(checkIfPrivatedOrRemoved, 500);
     }
 }
 
+
+function handlePageDataLoad(event){
+
+    if (window.location.href.indexOf("/playlist?")>0)
+    {
+        console.debug("[Filmot] [DEBUG] New videos likely detected. Scanning new titles.");
+        extractIDsFullView();
+    }
+
+}
+
+
+
+
+
+
+
+
+
+// CORE OPERATIONS =============================================================================================================
+
+
 function cleanUP() {
+    /*
+    cleanUP
+    This function clears global variables and Filmot-added tags that are used by other parts of the script.
+    */
+
     $(".filmot_hide").show();
     $(".filmot_hide").removeClass("filmot_hide");
     $(".filmot_newimg").remove();
@@ -92,210 +167,41 @@ function cleanUP() {
     window.RecoveredIDS={};
     window.DetectedIDS={};
 }
+
 function checkIfPrivatedOrRemoved() {
-    const playabilityStatus = unsafeWindow.ytInitialPlayerResponse?.playabilityStatus;
-    if (!playabilityStatus) return;
+    /*
+    checkIfPrivatedOrRemoved
+    This function checks the HTTP response of a given video and evaluates it for age or playback errors
+    */
 
-    const status = playabilityStatus.status;
-    //console.log("[Filmot] Playability Status:", playabilityStatus);
-
-    if (status === "ERROR" || (status === "LOGIN_REQUIRED" && !playabilityStatus.desktopLegacyAgeGateReason)) {
-        const id = unsafeWindow.ytInitialData?.currentVideoEndpoint?.watchEndpoint?.videoId;
-
-        if (id && id.length >= 11) {
-            // 1. Create a centered, floating container directly on the body
-            let infoContainer = $("#filmot-centered-container");
-
-            if (!infoContainer.length) {
-                infoContainer = $(document.createElement('div'))
-                    .attr("id", "filmot-centered-container")
-                    .addClass("filmot-deleted-video-container")
-                    .css({
-                        "position": "fixed",
-                        "top": "50%",
-                        "left": "50%",
-                        "transform": "translate(-50%, -50%)",
-                        "z-index": "999999", // Sits above all YouTube UI
-                        "padding": "30px 40px",
-                        "background-color": "var(--yt-spec-raised-background, rgba(33, 33, 33, 0.98))",
-                        "border": "1px solid var(--yt-spec-10-percent-layer, rgba(255,255,255,0.2))",
-                        "border-radius": "12px",
-                        "box-shadow": "0 10px 40px rgba(0,0,0,0.8)",
-                        "text-align": "center",
-                        "display": "flex",
-                        "flex-direction": "column",
-                        "align-items": "center",
-                        "width": "max-content",
-                        "max-width": "90vw"
-                    });
-
-                // Add Close Button
-                const closeButton = $(document.createElement('button'))
-                    .text("✖")
-                    .css({
-                        "position": "absolute",
-                        "top": "10px",
-                        "right": "15px",
-                        "background": "transparent",
-                        "border": "none",
-                        "color": "var(--yt-spec-text-secondary, #aaaaaa)",
-                        "font-size": "18px",
-                        "cursor": "pointer"
-                    });
-
-                closeButton.on("click", function() {
-                    infoContainer.remove();
-                });
-
-                infoContainer.append(closeButton);
-                $('body').append(infoContainer);
-            }
-
-            // 2. Add Name / ID Header securely
-            const titleElement = $(document.createElement('a'))
-                .attr({
-                    "href": `https://youtu.be/${id}`,
-                    "target": "_blank"
-                })
-                .css({
-                    "color": "#3ea6ff",
-                    "text-decoration": "none",
-                    "display": "block",
-                    "margin-bottom": "15px",
-                    "font-size": "1.6rem",
-                    "font-weight": "500"
-                })
-                .text(`Unavailable Video ID: ${id}`);
-
-            // 3. Create Wayback Machine button securely
-            const waybackButton = $(document.createElement('button-view-model'))
-                .addClass("filmot_button yt-spec-button-view-model");
-
-            const anchor = $(document.createElement('a'))
-                .addClass("yt-spec-button-shape-next yt-spec-button-shape-next--filled yt-spec-button-shape-next--overlay yt-spec-button-shape-next--size-m yt-spec-button-shape-next--icon-leading")
-                .attr({
-                    "target": "_blank",
-                    "aria-haspopup": "false",
-                    "force-new-state": "true",
-                    "aria-disabled": "false",
-                    "aria-label": "Check/view Wayback archive",
-                    "videoID": id
-                })
-                .css({
-                    "background-color": "thistle",
-                    "cursor": "pointer",
-                    "text-decoration": "none",
-                    "display": "inline-flex"
-                });
-
-            const iconWrapper = $(document.createElement('div'))
-                .addClass("yt-spec-button-shape-next__icon")
-                .attr("aria-hidden", "true");
-
-            const icon = $(document.createElement('img'))
-                .attr("src", "https://www.google.com/s2/favicons?domain=archive.org")
-                .css({
-                    "margin-left": "3px",
-                    "margin-top": "5px",
-                    "width": "16px",
-                    "height": "16px"
-                });
-
-            const textNode = $(document.createElement('div'))
-                .addClass("yt-spec-button-shape-next__button-text-content")
-                .attr("id", "state-text")
-                .text("Check For Archives");
-
-            // Safely assemble and append
-            iconWrapper.append(icon);
-            anchor.append(iconWrapper, textNode);
-            waybackButton.append(anchor);
-            infoContainer.append(titleElement, waybackButton);
-
-            // 4. Attach Wayback checking logic
-            anchor.one("click", function(event) {
-                const $this = $(this);
-                $this.css("opacity", 0.5);
-                $this.find("#state-text").text("Checking...");
-
-                const videoID = $this.attr("videoID");
-                const url = typeof getWaybackVideoAvailabilityCheckURL === "function"
-                    ? getWaybackVideoAvailabilityCheckURL(videoID)
-                    : `https://archive.org/wayback/available?url=youtube.com/watch?v=${videoID}`;
-
-                GM_xmlhttpRequest({
-                    method: "GET",
-                    url: url,
-                    onload: (response) => {
-                        try {
-                            const data = JSON.parse(response.responseText);
-                            let isAvailable = false;
-                            let archiveUrl = "";
-                            let timestamp = "";
-
-                            if (Array.isArray(data) && data.length > 1) {
-                                timestamp = data[1][0];
-                                archiveUrl = `https://web.archive.org/web/${timestamp}oe_/${data[1][1]}`;
-                                isAvailable = true;
-                            } else if (data.archived_snapshots && data.archived_snapshots.closest) {
-                                timestamp = data.archived_snapshots.closest.timestamp;
-                                archiveUrl = data.archived_snapshots.closest.url;
-                                isAvailable = true;
-                            }
-
-                            if (isAvailable) {
-                                $this.attr("href", archiveUrl)
-                                     .css("background-color", "limegreen");
-                                const dateStr = typeof waybackTimestampToDateString === "function"
-                                    ? waybackTimestampToDateString(timestamp)
-                                    : timestamp;
-                                $this.find("#state-text").text("Available: " + dateStr);
-                            } else {
-                                $this.css("background-color", "lightcoral")
-                                     .find("#state-text").text("Not Available");
-                            }
-                            $this.css("opacity", 1);
-                        } catch (err) {
-                            $this.css("background-color", "lightcoral")
-                                 .find("#state-text").text("Parsing Error");
-                            $this.css("opacity", 1);
-                        }
-                    },
-                    onerror: (err) => {
-                        $this.css("background-color", "lightcoral")
-                             .find("#state-text").text("Network Error");
-                        $this.css("opacity", 1);
-                    }
-                });
-            });
-
-            // 5. Trigger Filmot API Check
-            window.deletedIDs = id;
-            window.deletedIDCnt = 1;
-
-            if (!window.DetectedIDS) window.DetectedIDS = {};
-            window.DetectedIDS[id] = 1;
-
-            if (typeof processClick === "function") {
-                processClick(2, 0);
-            }
+    const playabilityStatus=unsafeWindow.ytInitialPlayerResponse.playabilityStatus;
+    const status=playabilityStatus.status;
+    if (status=="ERROR" || (status=="LOGIN_REQUIRED" && !playabilityStatus.valueOf().desktopLegacyAgeGateReason)) {
+        var id=unsafeWindow.ytInitialData.currentVideoEndpoint.watchEndpoint.videoId;
+        if (id.length>=11) {
+            window.deletedIDs=id;
+            window.deletedIDCnt=1;
+            window.DetectedIDS[id]=1;
+            processClick(2,0);
         }
     }
 }
 
-
 function createRestoreButton() {
+    /*
+    createRestoreButton
+    This function is used on a playlist page to create a custom Filmot status box, indicating how many videos in the playlist have been restored.
+    */
+
     // Time to create the 'Restore Titles' button in the Playlist Description Box (left side pane, beneath playlist thumbnail)
     console.log("[Filmot] [DEBUG] Creating 'Restore Titles' button in playlist description box.");
 
     /////////////////////////////////////////////// PLEASE READ /////////////////////////////////////////////////////////////////////////////
     // For some reason, YouTube (or a browser plugin) sometimes creates one or more duplicate, commented-out Description Boxes.
-    // Therefore, we locate all Playlist Description Box elements where 'restore titles' buttons can be placed, and place them in an array.
+    // Therefore, we locate all Playlist Description Box elements (classes) where 'restore titles' buttons can be placed, and place them in an array.
     // This is admittedly a scorched-earth method, but I am tired of YouTube constantly changing element IDs and breaking this.
-    //
-    var metactionbars = Array.from(document.querySelectorAll('yt-content-metadata-view-model.ytPageHeaderViewModelContentMetadataOverlay, .description.style-scope.ytd-playlist-header-renderer, page-header-view-model-wiz__page-header-headline-info, .yt-page-header-view-model__page-header-content-metadata--page-header-content-metadata-overlay, div.page-header-view-model-wiz__page-header-content > div.page-header-view-model-wiz__page-header-headline-info, .play-menu.ytd-playlist-header-renderer')).filter(el => el.offsetParent !== null);
-
-
+    // Note: these are class names.
+    var metactionbars = Array.from(document.querySelectorAll('.description.style-scope.ytd-playlist-header-renderer, .ytPageHeaderViewModelContentMetadata.ytPageHeaderViewModelContentMetadataOverlay.ytContentMetadataViewModelHost')).filter(el => el.offsetParent !== null);
 
     //        ^^^^^ UPDATE THIS WHEN YOUTUBE BREAKS SIDEBAR ELEMENT IDs ^^^^^
     //
@@ -305,7 +211,7 @@ function createRestoreButton() {
     //
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    //console.log(metactionbars);
+    // console.log(metactionbars);
 
     // Check if the metaactionbars array isn't empty.
     if (metactionbars !== undefined || metactionbars.length != 0) {
@@ -313,11 +219,11 @@ function createRestoreButton() {
         for (var i = metactionbars.length - 1; i >= 0; i--) {
             // Discard potential placement locations that are invisible (see large comment block above)
             if (!metactionbars[i].checkVisibility()) {
-                console.log("[Filmot] [DEBUG] [" + i + "/" + metactionbars.length + "] Skipping commented code region.");
+                console.debug("[Filmot] [DEBUG] [" + i + "/" + metactionbars.length + "] Skipping commented code region.");
                 continue;
             }
 
-            console.log("[Filmot] [DEBUG] [" + i + "/" + metactionbars.length + "] Attempting to attach restore button.");
+            console.debug("[Filmot] [DEBUG] [" + i + "/" + metactionbars.length + "] Attempting to attach restore button.");
 
             // Create the container div
             var containerDiv = document.createElement('div');
@@ -351,646 +257,615 @@ function createRestoreButton() {
         }
     }
     else {
-        console.log("[Filmot] [DEBUG] ERROR: Could not locate playlist sidebar to place restore button.");
+        console.debug("[Filmot] [DEBUG] ERROR: Could not locate playlist sidebar to place restore button.");
     }
 
 }
 
 function extractIDsFullView() {
-    //console.log("Starting extractIDsFullView");
+    /*
+    extractIDsFullView
+    This function fires on a playlist page (Liked Videos, Favorites, Custom Playlist)
+    It detects deleted videos (assuming user has clicked 'show unavailable videos') and fetches their video ID.
+    This list of unavailable video IDs are added to a global variable which is accessed by other parts of the script.
+    */
+
     window.deletedIDs = "";
     window.deletedIDCnt = 0;
+
     var deletedIDs = "";
     var deletedIDsCnt = 0;
 
-    var rendererSelector = "h3.ytLockupMetadataViewModelHeadingReset, h3.ytd-playlist-video-renderer";
-    $(rendererSelector).filter(function() {
-        if ($(this).attr('aria-label')) {
-            return false;
+    // Find all unavailable video elements in the playlist.
+    // Depending on the type of playlist, the video element may be different.
+    // As of this writing:
+    // Liked Videos: yt-lockup-view-model
+    // Favorites: ytd-playlist-video-renderer
+    // Custom: ytd-playlist-video-renderer
+
+    // Generate an array of all videos on playlist page.
+    // Each playlist type has a different way of displaying videos, so we comingle all cases.
+    console.debug('[Filmot] [DEBUG] Fetching all videos on playlist page.');
+
+    const videoEntries = Array.from(
+        document.querySelectorAll("yt-lockup-view-model, ytd-playlist-video-renderer")
+    );
+
+    if (!videoEntries.length) {
+        console.log("[Filmot] [DEBUG] No videos found on playlist page. This is likely an error.");
+        return;
+    }
+
+    console.debug('[Filmot] [DEBUG] printing all videos found on page:');
+    console.debug(videoEntries);
+
+
+
+    // From our previously generated list of all visible videos, identify deleted/private/unavailable ones.
+    // Each playlist type has a different way of indicating a video is unavailble, so we comingle all cases.
+    console.debug('[Filmot] [DEBUG] Detecting unavailable videos on playlist page.');
+    const deletedVideos = videoEntries.filter(lockup =>
+        lockup.textContent.includes("No views") ||
+        lockup.textContent.includes("[Deleted video]") ||
+        lockup.textContent.includes("[Private video]")
+    );
+
+    if (!deletedVideos.length) {
+        console.debug("[Filmot] [DEBUG] Found videos on playlist page, but none that were unavailable.");
+
+        console.debug("[Filmot] [DEBUG] Printing the text content of all video entry elements on page:");
+
+        for (const entry of videoEntries) {
+            console.debug("-----");
+            console.debug(entry.textContent);
         }
-        return true;
-    }).each(function(index, element) {
 
-        // element == this == h3.ytLockupMetadataViewModelHeadingReset
+        return;
+    }
 
-        var titleContainer = $(this);
-        var ahref = titleContainer
-            .closest("yt-lockup-view-model")
-            .find('a[href*="/watch?v="]')
-            .first();
+    console.debug('[Filmot] [DEBUG] printing unavailable videos found on page:');
+    console.debug(deletedVideos);
 
-        if (ahref.length == 0) {
-            ahref = titleContainer.find('a#video-title[href*="/watch?v="]').first();
+
+
+
+
+    console.debug(
+        `[Filmot] Found ${videoEntries.length} visible videos (${deletedVideos.length} presumed deleted/private).`
+    );
+
+    // Extract IDs from deleted videos only
+    deletedVideos.forEach(lockup => {
+
+        // Find the watch link inside the lockup
+        const link = lockup.querySelector('a[href*="/watch?v="]');
+        if (!link) return;
+
+        // Skip already processed entries (prevents duplicates on re-scan)
+        if (link.hasAttribute("filmot_chk")) return;
+
+        const href = link.getAttribute("href");
+
+        // Extract video ID safely from URL
+        const match = href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+        if (!match) return;
+
+        const id = match[1];
+
+        // Mark as processed
+        link.setAttribute("filmot_chk", "1");
+
+        // Register globally
+        window.DetectedIDS[id] = 1;
+
+        // Build CSV list of deleted video IDs
+        if (deletedIDs.length > 0) {
+            deletedIDs += ",";
         }
+        deletedIDs += id;
 
-        if (ahref.length > 0) {
-            var checked = ahref.attr("filmot_chk");
-            if (!checked) {
-                var href = ahref.attr("href");
-                var id = String(href.match(/v=[0-9A-Za-z_\-]*/gm));
-
-                id = id.substring(2);
-
-                if (id.length >= 11) {
-                    ahref.attr("filmot_chk", "1");
-
-                    // Construct Wayback button compactly via jQuery
-                    const $iaAnchor = $('<a>')
-                        .attr({
-                            "id": "button-wayback",
-                            "target": "_blank",
-                            "title": "Check/view Wayback archive",
-                            "aria-haspopup": "false",
-                            "force-new-state": "true"
-                        })
-                        .addClass("ia_button")
-                        .css({
-                            "float": "right",
-                            "margin-left": "10px",
-                            "background-color": "thistle",
-                            "color": "#000000",
-                            "padding": "2px 8px",
-                            "border-radius": "4px",
-                            "display": "inline-flex",
-                            "align-items": "center",
-                            "font-family": "Roboto, Arial, sans-serif",
-                            "font-size": "12px",
-                            "font-weight": "bold",
-                            "text-decoration": "none",
-                            "cursor": "pointer"
-                        });
-
-                    const $icon = $('<img>')
-                        .attr("src", "https://www.google.com/s2/favicons?domain=archive.org")
-                        .css({
-                            "margin-right": "4px",
-                            "width": "12px",
-                            "height": "12px"
-                        });
-
-                    const $textSpan = $('<span>')
-                        .attr("id", "state-text")
-                        .text("Check Archive")
-                        .css("line-height", "1");
-
-                    // Assemble and inject
-                    $iaAnchor.append($icon, $textSpan);
-                    titleContainer.css("display", "block").prepend($iaAnchor);
-
-                    const archiveData = window.ArchivedIDS[id];
-                    if (typeof archiveData === "object") {
-                        $iaAnchor.attr("href", archiveData.url)
-                                 .css("background-color", "limegreen");
-                        $textSpan.text("Available: " + waybackTimestampToDateString(archiveData.timestamp));
-                    } else if (archiveData === false) {
-                        $iaAnchor.css("background-color", "lightcoral");
-                        $textSpan.text("Not Available");
-                    } else {
-                        $iaAnchor.attr({
-                            "href": "javascript:void(0);",
-                            "videoID": id
-                        });
-
-                        $iaAnchor.one("click", function(e) {
-                            e.preventDefault();
-                            $(this).css("opacity", 0.5);
-                            $(this).find("#state-text").text("Checking...");
-
-                            const videoID = $(this).attr("videoID");
-                            console.log(`[Filmot] [DEBUG] Checking Wayback Machine for archives of video "${videoID}"...`);
-
-                            GM_xmlhttpRequest({
-                                method: "GET",
-                                url: getWaybackVideoAvailabilityCheckURL(videoID),
-                                onload: (response) => {
-                                    try {
-                                        const data = JSON.parse(response.responseText);
-                                        if (data.length > 1) {
-                                            const timestamp = data[1][0];
-                                            const archiveData = {
-                                                timestamp,
-                                                url: `https://web.archive.org/web/${timestamp}oe_/${data[1][1]}`
-                                            };
-                                            window.ArchivedIDS[videoID] = archiveData;
-
-                                            $(this).attr("href", archiveData.url)
-                                                .css({
-                                                    "background-color": "limegreen",
-                                                    "opacity": 1
-                                                })
-                                                .find("#state-text").text("Available: " + waybackTimestampToDateString(timestamp));
-                                        } else {
-                                            window.ArchivedIDS[videoID] = false;
-
-                                            $(this).attr("href", "javascript:void(0);")
-                                                .css({
-                                                    "background-color": "lightcoral",
-                                                    "opacity": 1
-                                                })
-                                                .find("#state-text").text("Not Available");
-                                        }
-                                    } catch (err) {
-                                        console.error("Error parsing video archive availability data from Wayback Machine!", err);
-                                        $(this).css("opacity", 1).find("#state-text").text("Error");
-                                    }
-                                },
-                                onerror: (err) => {
-                                    console.error("Error fetching video archive availability data from Wayback Machine!", err);
-                                    $(this).css("opacity", 1).find("#state-text").text("Error");
-                                }
-                            });
-                        });
-                    }
-
-                    // Add to deleted IDs
-                    window.DetectedIDS[id] = 1;
-                    if (deletedIDs.length > 0) {
-                        deletedIDs += ",";
-                    }
-                    deletedIDs += id;
-                    deletedIDsCnt++;
-                }
-            }
-        }
+        deletedIDsCnt++;
     });
 
-    if (deletedIDs.length > 0) {
-        window.deletedIDs = deletedIDs;
-        window.deletedIDCnt = deletedIDsCnt;
+    // Save state globally
+    window.deletedIDs = deletedIDs;
+    window.deletedIDCnt = deletedIDsCnt;
 
-        // If there are titles to be restored...
-        if (document.getElementById("TitleRestoredBtn") == null) {
-            console.log("[Filmot] [DEBUG] There are " + deletedIDsCnt + " titles to restore.");
+    if (deletedIDsCnt > 0) {
+
+        console.debug(`[Filmot] [DEBUG] There are ${deletedIDsCnt} titles to restore.`);
+
+        // Ensure restore button is only created once (check if our custom ID already exists on the element)
+        if (document.getElementById("TitleRestoredBtn") === null) {
             createRestoreButton();
         }
 
-        // Check Filmot for archived metadata
+        // Trigger downstream processing
+        console.debug(`[Filmot] [DEBUG] Firing processClick`);
         processClick(1, 0);
+
+    } else {
+        console.log("[Filmot] [DEBUG] No titles found to restore.");
     }
 }
 
-function reportAJAXError(error)
-{
-    alert("Error fetching API results " + error);
-}
-
-function rgb2lum(rgb)
-{
-    // calculate relative luminance of a color provided by rgb() string
-    // black is 0, white is 1
-    rgb = rgb.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
-    if (rgb.length==4) {
-        var R=parseInt(rgb[1],10)/255.0;
-        var G=parseInt(rgb[2],10)/255.0;
-        var B=parseInt(rgb[3],10)/255.0;
-        return 0.2126*R + 0.7152*G + 0.0722*B;
-    }
-    return 1;
-}
 function processJSONResultSingleVideo(fetched_details, format) {
-    // 1. Target the centered container created by checkIfPrivatedOrRemoved
-    const container = $("#filmot-centered-container");
-    if (!container.length) return;
+    /*
+    processJSONResultSingleVideo
+    This function accepts a JSON list of Filmot info on a single video that was previously identified as deleted.
+    This function parses this list of information, and attempts to 'fill in the blanks' on the video error page.
+    Since the video was deleted / removed, the playback page will contain some form of error / warning.
+    */
 
-    if (!window.RecoveredIDS) window.RecoveredIDS = {};
+    if (format != 2) {
+        console.error("[Filmot] Internal error: processJSONResultSingleVideo called for format other than 1 (single video)");
+        return;
+    }
 
+    var darkMode = -1;
     for (let i = 0; i < fetched_details.length; ++i) {
-        const meta = fetched_details[i];
-        const escapedTitle = meta.title;
+        var meta = fetched_details[i];
+        var escapedTitle = meta.title;
+
+        let item;
+        // Dead channel or deleted/private video (non-player error)
+        let parentItem = $("ytd-background-promo-renderer");
+        if (parentItem.length) {
+            item = parentItem.find("div.promo-message").first();
+
+            parentItem.css("padding-top", "100px");
+        } else {
+            // Video removed for policy violations (player error)
+            parentItem = $("div#player");
+            item = parentItem.find("#subreason.yt-player-error-message-renderer").first();
+
+            // Make player error take up the whole screen, only if there is no playlist panel visible on the page
+            const playlistPanel = $("ytd-playlist-panel-renderer");
+            if (!playlistPanel.length || playlistPanel.attr("hidden") !== undefined) {
+                parentItem.css("position", "unset");
+            }
+        }
+
+        if (darkMode == -1) {
+            var lum = rgb2lum(item.css("color"));
+            darkMode = (lum > 0.51) ? 1 : 0; // if text is bright it means we are in dark mode
+        }
 
         if (!window.RecoveredIDS[meta.id]) {
             window.RecoveredIDS[meta.id] = 1;
             if (meta.channelname == null) {
-                meta.channelname = meta.channelid;
+                meta.channelname = fetched_details[i].channelid;
             }
 
-            // 2. Add visual divider
-            const divider = $(document.createElement('hr'))
-                .css({
-                    "border": "0",
-                    "border-top": "1px solid var(--yt-spec-10-percent-layer, rgba(255, 255, 255, 0.2))",
-                    "margin": "20px 0",
-                    "width": "100%"
-                });
+            // Create "Powered by Filmot" link
+            var brEl = document.createElement('br');
+            item[0].appendChild(brEl);
 
-            // 3. Create "Metadata recovered by Filmot.com" note
-            const filmotNote = $(document.createElement('div'))
-                .css({
-                    "margin-bottom": "10px",
-                    "font-size": "1.2rem",
-                    "color": "var(--yt-spec-text-secondary, #aaaaaa)"
-                })
-                .text("Metadata recovered by ");
+            var poweredByFilmot = document.createElement('a');
+            poweredByFilmot.style.fontSize = 'large';
+            poweredByFilmot.className = 'yt-simple-endpoint style-scope yt-formatted-string';
+            poweredByFilmot.href = 'https://filmot.com';
+            poweredByFilmot.target = '_blank';
+            poweredByFilmot.textContent = 'Title and Channel from filmot.com';
+            item[0].appendChild(poweredByFilmot);
 
-            const filmotLink = $(document.createElement('a'))
-                .attr({
-                    "href": "https://filmot.com",
-                    "target": "_blank"
-                })
-                .css({
-                    "color": "#3ea6ff",
-                    "text-decoration": "none"
-                })
-                .text("filmot.com");
+            // Create title link
+            var titleContainer = document.createElement('h2');
+            titleContainer.textContent = 'Title: ';
+            var titleLink = document.createElement('a');
+            titleLink.className = 'filmot_c_link yt-simple-endpoint style-scope yt-formatted-string';
+            titleLink.dir = 'auto';
+            titleLink.href = 'https://filmot.com/video/' + meta.id;
+            titleLink.textContent = escapedTitle;
+            titleLink.style.color = ((darkMode == 0) ? 'black': 'white');
+            titleContainer.appendChild(titleLink);
+            item[0].appendChild(titleContainer);
 
-            filmotNote.append(filmotLink);
+            // Create channel link
+            var channelContainer = document.createElement('h2');
+            channelContainer.textContent = 'Channel: ';
+            var channelLink = document.createElement('a');
+            channelLink.className = 'filmot_c_link yt-simple-endpoint style-scope yt-formatted-string';
+            channelLink.dir = 'auto';
+            channelLink.href = 'https://www.youtube.com/channel/' + meta.channelid;
+            channelLink.textContent = meta.channelname;
+            channelContainer.appendChild(channelLink);
+            item[0].appendChild(channelContainer);
 
-            // 4. Create Title element
-            const titleContainer = $(document.createElement('h3'))
-                .css({
-                    "color": "var(--yt-spec-text-primary, #fff)",
-                    "font-size": "1.4rem",
-                    "margin": "5px 0",
-                    "font-weight": "normal"
-                })
-                .text("Title: ");
-
-            const titleLink = $(document.createElement('a'))
-                .attr({
-                    "href": 'https://filmot.com/video/' + meta.id,
-                    "target": "_blank",
-                    "dir": "auto"
-                })
-                .addClass("filmot_c_link yt-simple-endpoint style-scope yt-formatted-string")
-                .css({
-                    "color": "#3ea6ff",
-                    "text-decoration": "none",
-                    "font-weight": "500"
-                })
-                .text(escapedTitle);
-
-            titleContainer.append(titleLink);
-
-            // 5. Create Channel element
-            const channelContainer = $(document.createElement('h3'))
-                .css({
-                    "color": "var(--yt-spec-text-primary, #fff)",
-                    "font-size": "1.4rem",
-                    "margin": "5px 0 15px 0",
-                    "font-weight": "normal"
-                })
-                .text("Channel: ");
-
-            const channelLink = $(document.createElement('a'))
-                .attr({
-                    "href": 'https://www.youtube.com/channel/' + meta.channelid,
-                    "target": "_blank",
-                    "dir": "auto"
-                })
-                .addClass("filmot_c_link yt-simple-endpoint style-scope yt-formatted-string")
-                .css({
-                    "color": "#3ea6ff",
-                    "text-decoration": "none",
-                    "font-weight": "500"
-                })
-                .text(meta.channelname);
-
-            channelContainer.append(channelLink);
-
-            // 6. Create Thumbnail image
-            const newThumb = $(document.createElement('img'))
-                .attr({
-                    "id": "filmot_newimg",
-                    "title": escapedTitle,
-                    "src": 'https://filmot.com/vi/' + meta.id + '/default.jpg'
-                })
-                .addClass("style-scope yt-img-shadow filmot_newimg")
-                .css({
-                    "width": "320px",
-                    "max-width": "100%",
-                    "border-radius": "8px",
-                    "cursor": "pointer",
-                    "box-shadow": "0 2px 8px rgba(0,0,0,0.5)"
-                });
-
-            newThumb.on("click", function(event) {
-                prompt('Full Title', escapedTitle);
-                event.stopPropagation();
-                return false;
-            });
-
-            // 7. Inject safely into the centered container
-            container.append(divider, filmotNote, titleContainer, channelContainer, newThumb);
-        }
-    }
-}
-
-function processJSONResultFullViewOldFormat(fetched_details, format) {
-    var darkMode = -1;
-
-    for (let i = 0; i < fetched_details.length; ++i) {
-        var meta = fetched_details[i];
-        window.RecoveredIDS[meta.id] = 1;
-        if (meta.channelname == null) {
-            meta.channelname = fetched_details[i].channelid;
-        }
-        var rendererSelector = "#container.ytd-playlist-video-renderer";
-        $(rendererSelector).filter(function() {
-            return $(this).find("a.ytd-playlist-video-renderer[href*='" + meta.id + "']").length > 0;
-        }).each(function(index, element) {
-            const escapedTitle = meta.title;
-
-            var item = $(element);
-            item.addClass("filmot_highlight");
-            var titleItem = item.find("#video-title");
-            titleItem.text(meta.title);
-            titleItem.attr("title", meta.title);
-            titleItem.attr("aria-label", meta.title);
-            titleItem.addClass("filmot_title");
-            if (darkMode == -1) {
-                var lum = rgb2lum(titleItem.css("color"));
-                darkMode = (lum > 0.51) ? 1 : 0; //if text is bright it means we are in dark mode
-            }
-            item.css("background-color", (darkMode == 0) ? lightModeBackground : darkModeBackground);
-
-            var channelItem = titleItem.parent();
-            channelItem.find("a.filmot_c_link").remove();
-
-            // Create a new anchor element
-            var channelLinkElement = document.createElement('a');
-            channelLinkElement.className = 'filmot_c_link yt-simple-endpoint style-scope yt-formatted-string';
-            channelLinkElement.dir = 'auto';
-            channelLinkElement.href = 'https://www.youtube.com/channel/' + meta.channelid;
-            channelLinkElement.textContent = meta.channelname;
-            if (darkMode==1) {
-                channelLinkElement.style.color = darkModeLinkColor;
-            }
-
-            // Append the new element
-            channelItem[0].appendChild(channelLinkElement);
-
-            item.find("#byline-container").attr("hidden", false);
-            item.find(".filmot_newimg").remove();
-
-            // Create a new image element
-            var newThumbElement = document.createElement('img');
-            newThumbElement.id = 'filmot_newimg';
-            newThumbElement.className = 'style-scope yt-img-shadow filmot_newimg';
-            newThumbElement.style.width = '100%';
-            newThumbElement.src = 'https://filmot.com/vi/' + meta.id + '/default.jpg';
-            newThumbElement.title = escapedTitle;
-            newThumbElement.onclick = function(event) {
+            // Create thumbnail image
+            var newThumb = document.createElement('img');
+            newThumb.id = 'filmot_newimg';
+            newThumb.className = 'style-scope yt-img-shadow filmot_newimg';
+            newThumb.onclick = function(event) {
                 prompt('Full Title', escapedTitle);
                 event.stopPropagation();
                 return false;
             };
+            newThumb.title = escapedTitle;
+            newThumb.width = 320;
+            newThumb.src = 'https://filmot.com/vi/' + meta.id + '/default.jpg';
+            item[0].appendChild(newThumb);
 
-            // Append the new image
-            item.find("yt-image")[0].appendChild(newThumbElement);
+            // Create Wayback Machine archive check/view button
+            const waybackButton = $('<button-view-model>')
+                .addClass("filmot_button yt-spec-button-view-model")
+                .css("margin-bottom", "10px");
+            const anchor = $('<a>')
+                .addClass("yt-spec-button-shape-next yt-spec-button-shape-next--filled yt-spec-button-shape-next--overlay yt-spec-button-shape-next--size-m yt-spec-button-shape-next--icon-leading yt-spec-button-shape-next--enable-backdrop-filter-experiment")
+                .attr({
+                    "target": "_blank",
+                    "aria-haspopup": "false",
+                    "force-new-state": "true",
+                    "aria-disabled": "false",
+                    "aria-label": "Check/view Wayback archive",
+                    "videoID": meta.id
+                })
+                .css("background-color", "thistle")
+                .one("click", function() {
+                    $(this).css("opacity", 0.5);
+                    $(this).find("#state-text").text("Checking...");
 
-            item.find("img.ytCoreImageHost").addClass("filmot_hide").hide();
-
-            // Add Filmot button
-            let filmotButton = item.find("button-view-model#button-view-filmot");
-            if (filmotButton.length) {
-                // Button exists, update the URL
-                filmotButton.find("a").attr("href", "https://filmot.com/video/" + meta.id);
-            } else {
-                filmotButton = $(document.createElement('button-view-model'))
-                    .addClass("filmot_button yt-spec-button-view-model")
-                    .attr("id", "button-view-filmot")
-                    .css({
-                        "margin-right": "5px",
-                        "margin-top": "2vw"
-                });
-                const anchor = $('<a>')
-                    .addClass("yt-spec-button-shape-next yt-spec-button-shape-next--filled yt-spec-button-shape-next--overlay yt-spec-button-shape-next--size-m yt-spec-button-shape-next--icon-leading yt-spec-button-shape-next--enable-backdrop-filter-experiment")
-                    .attr({
-                        "target": "_blank",
-                        "aria-haspopup": "false",
-                        "force-new-state": "true",
-                        "aria-disabled": "false",
-                        "href": "https://filmot.com/video/" + meta.id,
-                        "aria-label": "View on Filmot"
-                    })
-                    .css("padding-right", "0");
-                const iconWrapper = $('<div>')
-                    .addClass("yt-spec-button-shape-next__icon")
-                    .attr("aria-hidden", "true");
-                const icon = $('<img>')
-                    .attr("src", "https://www.google.com/s2/favicons?domain=filmot.com")
-                    .css({
-                        "margin-left": "3px",
-                        "margin-top": "5px"
+                    const videoID = $(this).attr("videoID");
+                    console.log(`[Filmot] [DEBUG] Checking Wayback Machine for archives of video "${videoID}"...`);
+                    GM_xmlhttpRequest({
+                        method: "GET",
+                        url: getWaybackVideoAvailabilityCheckURL(videoID),
+                        onload: (response) => {
+                            try {
+                                const data = JSON.parse(response.responseText);
+                                if (data.length > 1) {
+                                    const timestamp = data[1][0];
+                                    $(this).attr("href", `https://web.archive.org/web/${timestamp}oe_/${data[1][1]}`)
+                                        .css("background-color", "limegreen")
+                                        .find("#state-text").text("Available: " + waybackTimestampToDateString(timestamp));
+                                } else {
+                                    $(this).css("background-color", "lightcoral")
+                                        .find("#state-text").text("Not Available");
+                                }
+                                $(this).css("opacity", 1);
+                            } catch (err) {
+                                console.error("[Filmot] Error parsing video archive availability data from Wayback Machine!", err)
+                            }
+                        },
+                        onerror: (err) => console.error("[Filmot] Error fetching video archive availability data from Wayback Machine!", err)
                     });
-                iconWrapper.append(icon);
-                anchor.append(iconWrapper);
-                filmotButton.append(anchor);
-                item.find("button-view-model").before(filmotButton); // Add as first (leftmost) button
-            }
-        });
+                });
+            const iconWrapper = $('<div>')
+                .addClass("yt-spec-button-shape-next__icon")
+                .attr("aria-hidden", "true");
+            const icon = $('<img>')
+                .attr("src", "https://www.google.com/s2/favicons?domain=archive.org")
+                .css({
+                    "margin-left": "3px",
+                    "margin-top": "5px"
+                });
+            const text = $('<div>')
+                .addClass("yt-spec-button-shape-next__button-text-content")
+                .attr("id", "state-text")
+                .text("Check For Archives");
+            iconWrapper.append(icon);
+            anchor.append(iconWrapper);
+            anchor.append(text);
+            waybackButton.append(anchor);
+            parentItem.find("div#buttons").prepend(waybackButton);
+        }
     }
-    $("#TitleRestoredBtn").text(Object.keys(window.RecoveredIDS).length + " of " + Object.keys(window.DetectedIDS).length + " restored");
 }
 
 function processJSONResultFullView(fetched_details, format) {
+    /*
+    processJSONResultFullView
+    This function accepts a JSON list of Filmot info on one or more deleted of videos of a PLAYLIST page (NOT a single video)
+    It parses this list of information, and attempts to 'fill in the blanks' on the playlist page.
+    */
+
+    // Ensure this function was properly called, as it is only designed to handle restoring videos on a playlist page.
+    if (format != 1) {
+        console.error("[Filmot] Internal error: processJSONResultFullView called for format other than 1 (multiple videos)");
+        return;
+    }
+
     var darkMode = -1;
 
-    for (let i = 0; i < fetched_details.length; ++i) {
-        var meta = fetched_details[i];
+    console.debug('[Filmot] [DEBUG] processJSONResultFullView called on playlist page to restore ' + fetched_details.length + ' videos.')
+
+
+
+
+    // Generate an array of all videos on playlist page.
+    // Each playlist type has a different way of displaying videos, so we comingle all cases.
+    console.debug('[Filmot] [DEBUG] Fetching all videos on playlist page.');
+
+    // Fetch the HTML elements of each video entry on the playlist page.
+    const videoEntries = Array.from(
+        document.querySelectorAll( // Liked video entry, favorite video entry,
+            ".ytLockupViewModelWrapper, .style-scope.ytd-playlist-video-list-renderer"
+        )
+    );
+
+    if (!videoEntries.length) {
+        console.log("[Filmot] [DEBUG] No videos found on playlist page. This is likely an error.");
+        return;
+    }
+
+    console.debug("[Filmot] [DEBUG] Found", videoEntries.length, "video elements on page.");
+    //console.debug('[Filmot] [DEBUG] printing all videos found on page:');
+    //console.debug(videoEntries);
+
+
+
+
+    // Create a list containing HTML elements of videos that we previously identified as missing/deleted
+    var videoEntriesMatching = [];
+
+    for (let i = 0; i < videoEntries.length; i++) {
+        let entry = videoEntries[i];
+
+        let href = entry.querySelector("a[href*='/watch?v=']")?.getAttribute("href");
+
+        if (!href) continue;
+
+        for (let j = 0; j < fetched_details.length; j++) {
+            if (href.includes(fetched_details[j].id)) {
+                videoEntriesMatching.push(entry);
+
+                break;
+            }
+        }
+    }
+
+    console.debug("[Filmot] [DEBUG] Detected", videoEntriesMatching.length, 'missing video elements on page');
+
+
+    for (let i = 0; i < videoEntriesMatching.length; i++) {
+        let item = videoEntriesMatching[i];
+
+        let href = item.querySelector("a[href*='/watch?v=']")?.getAttribute("href");
+        if (!href) continue;
+
+        let meta = fetched_details.find(m => href.includes(m.id));
+        if (!meta) continue;
+
+
+
+
+
+        // Attempt to delete the ugly missing title element
+        // Account for title elements of various playlist types (Liked, Favorites, Custom)
+        let title =
+            videoEntriesMatching[i].querySelector(".ytLockupMetadataViewModelTitle span") ||
+            videoEntriesMatching[i].querySelector(".yt-simple-endpoint.style-scope.ytd-playlist-video-renderer") ||
+            videoEntriesMatching[i].querySelector(".ytAttributedStringHost.ytAttributedStringWhiteSpacePreWrap") ||
+            videoEntriesMatching[i].querySelector(".someFutureSelector");
+
+        console.debug('   [Filmot] [DEBUG] missing video title:', i, title?.textContent);
+
+        title.remove()
+
+
+
+
+
         window.RecoveredIDS[meta.id] = 1;
-        if (meta.channelname == null) {
-            meta.channelname = fetched_details[i].channelid;
+
+        if (item.querySelector(".filmot_missing_panel")) continue;
+
+        let container =
+            item.querySelector(".ytLockupViewModelMetadata") || item;
+
+        // Base panel
+        let panel = document.createElement("div");
+        panel.className = "filmot_missing_panel";
+
+        panel.style.marginTop = "6px";
+        panel.style.padding = "8px 10px";
+        panel.style.borderRadius = "10px";
+        panel.style.display = "flex";
+        panel.style.flexDirection = "column";
+        panel.style.gap = "6px";
+
+        panel.style.background =
+            (typeof darkMode !== "undefined" && darkMode == 1)
+            ? darkModeBackground
+        : lightModeBackground;
+
+        panel.style.border = "1px solid rgba(255,255,255,0.08)";
+
+        // Title
+        let titleEl = document.createElement("div");
+        titleEl.textContent = meta.title;
+
+        titleEl.style.fontSize = "14px";
+        titleEl.style.fontWeight = "600";
+        titleEl.style.lineHeight = "1.3";
+
+        titleEl.style.color =
+            (typeof darkMode !== "undefined" && darkMode == 1)
+            ? "#ffffff"
+        : "#111111";
+
+        titleEl.style.cursor = "pointer";
+
+        titleEl.style.display = "-webkit-box";
+        titleEl.style.webkitLineClamp = "2";
+        titleEl.style.webkitBoxOrient = "vertical";
+        titleEl.style.overflow = "hidden";
+
+        titleEl.onclick = function (e) {
+            prompt("Full Title", meta.title);
+            e.stopPropagation();
+        };
+
+        // channel name
+        let channelEl = document.createElement("a");
+        channelEl.textContent = meta.channelname || meta.channelid;
+        channelEl.href = "https://www.youtube.com/channel/" + meta.channelid;
+        channelEl.target = "_blank";
+
+        channelEl.style.fontSize = "12px";
+        channelEl.style.opacity = "0.85";
+        channelEl.style.textDecoration = "none";
+
+        channelEl.style.color =
+            (typeof darkMode !== "undefined" && darkMode == 1)
+            ? darkModeLinkColor
+        : "#065fd4"; // YouTube blue fallback for light mode
+
+        channelEl.style.width = "fit-content";
+
+        channelEl.onmouseenter = () => channelEl.style.textDecoration = "underline";
+        channelEl.onmouseleave = () => channelEl.style.textDecoration = "none";
+
+        // button container
+        let buttonRow = document.createElement("div");
+        buttonRow.style.display = "flex";
+        buttonRow.style.gap = "8px";
+        buttonRow.style.marginTop = "2px";
+
+        function makeBtn(label, bg) {
+            let b = document.createElement("a");
+            b.textContent = label;
+            b.style.fontSize = "12px";
+            b.style.padding = "3px 8px";
+            b.style.borderRadius = "6px";
+            b.style.textDecoration = "none";
+            b.style.color = "#fff";
+            b.style.background = bg;
+            b.style.display = "inline-flex";
+            b.style.alignItems = "center";
+            return b;
         }
 
-        // Target the exact wrapper for this specific video ID only
-        var itemSelector = "yt-lockup-view-model:has(a.ytLockupViewModelContentImage[href*='" + meta.id + "'])";
+        // Filmot button
+        let filmotBtn = makeBtn("Filmot", "#d33");
+        filmotBtn.href = "https://filmot.com/video/" + meta.id;
+        filmotBtn.target = "_blank";
 
-        $(itemSelector).each(function(index, element) {
-            const escapedTitle = meta.title;
-            var item = $(element);
+        // Wayback button
+        let waybackBtn = makeBtn("Archive", "#666");
+        waybackBtn.target = "_blank";
 
-            //console.log(item);
+        let archiveData = window.ArchivedIDS?.[meta.id];
 
-            // Highlight just this specific item
-            item.addClass("filmot_highlight");
+        if (typeof archiveData === "object") {
+            waybackBtn.href = archiveData.url;
+            waybackBtn.textContent = "Archived";
+            waybackBtn.style.background = "green";
 
-            // 1. Handle New Title Structure via createElement
-            var titleItemContainer = item.find("h3.ytLockupMetadataViewModelHeadingReset");
-            if (titleItemContainer.length==0) {
-                titleItemContainer = item.parent();
-            }
+        } else if (archiveData === false) {
+            waybackBtn.textContent = "None";
+            waybackBtn.style.background = "#a33";
 
-            var titleItem = titleItemContainer.find("a.ytLockupMetadataViewModelTitle");
+        } else {
+            waybackBtn.href = "#";
 
-            if (titleItem.length === 0) {
-                // BUGFIX: Detach and preserve the IA button before clearing the container
-                var preservedIAButon = titleItemContainer.find(".ia_button").detach();
+            waybackBtn.addEventListener("click", function (e) {
+                e.preventDefault();
 
-                // Clear the container safely
-                titleItemContainer[0].textContent = '';
+                waybackBtn.textContent = "Checking...";
+                waybackBtn.style.opacity = "0.6";
 
-                var newTitleAnchor = document.createElement('a');
-                newTitleAnchor.className = 'ytLockupMetadataViewModelTitle';
-                newTitleAnchor.setAttribute('aria-haspopup', 'false');
-                newTitleAnchor.href = '/watch?v=' + meta.id;
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url: getWaybackVideoAvailabilityCheckURL(meta.id),
 
-                var newTitleSpan = document.createElement('span');
-                newTitleSpan.className = 'ytAttributedStringHost ytAttributedStringWhiteSpacePreWrap';
-                newTitleSpan.dir = 'auto';
-                newTitleSpan.setAttribute('role', 'text');
+                    onload: function (res) {
+                        try {
+                            const data = JSON.parse(res.responseText);
 
-                newTitleAnchor.appendChild(newTitleSpan);
-                titleItemContainer[0].appendChild(newTitleAnchor);
+                            if (data.length > 1) {
+                                const timestamp = data[1][0];
 
-                // Restore the IA button back to the container
-                if (preservedIAButon.length > 0) {
-                    titleItemContainer.prepend(preservedIAButon);
-                }
+                                const archive = {
+                                    timestamp,
+                                    url: `https://web.archive.org/web/${timestamp}oe_/${data[1][1]}`
+                                };
 
-                titleItem = $(newTitleAnchor);
-            }
+                                window.ArchivedIDS[meta.id] = archive;
 
-            var targetTextElement = titleItem.find("span").length ? titleItem.find("span") : titleItem;
-            targetTextElement.text(meta.title);
-            titleItem.attr("title", meta.title);
-            titleItem.attr("aria-label", meta.title);
-            titleItem.addClass("filmot_title");
+                                waybackBtn.href = archive.url;
+                                waybackBtn.textContent = "Archived";
+                                waybackBtn.style.background = "green";
 
-            if (darkMode == -1) {
-                var lum = rgb2lum(targetTextElement.css("color"));
-                darkMode = (lum > 0.51) ? 1 : 0;
-            }
+                            } else {
+                                window.ArchivedIDS[meta.id] = false;
+                                waybackBtn.textContent = "None";
+                                waybackBtn.style.background = "#a33";
+                            }
 
-            item.find(".ytLockupViewModelHost").css("background-color", (darkMode == 0) ? lightModeBackground : darkModeBackground);
+                            waybackBtn.style.opacity = "1";
+                        } catch (e) {
+                            console.error("Wayback parse error", e);
+                        }
+                    },
 
-            // 2. Handle New Channel Info Structure via createElement
-            var metaViewModel = item.find("yt-content-metadata-view-model");
-            metaViewModel.find(".filmot_c_row").remove();
+                    onerror: function (err) {
+                        console.error("Wayback request failed", err);
+                    }
+                });
+            });
+        }
 
-            var channelRow = document.createElement('div');
-            channelRow.setAttribute('role', 'group');
-            channelRow.className = 'ytContentMetadataViewModelMetadataRow filmot_c_row';
+        buttonRow.appendChild(filmotBtn);
+        buttonRow.appendChild(waybackBtn);
 
-            var channelSpanOuter = document.createElement('span');
-            channelSpanOuter.className = 'ytAttributedStringHost ytContentMetadataViewModelMetadataText ytAttributedStringWhiteSpacePreWrap ytAttributedStringLinkInheritColor';
-            channelSpanOuter.dir = 'auto';
+        // put everything together
+        panel.appendChild(titleEl);
+        panel.appendChild(channelEl);
+        panel.appendChild(buttonRow);
 
-            var channelSpanInner = document.createElement('span');
-            channelSpanInner.dir = 'auto';
-            channelSpanInner.style.fontWeight = '400';
-
-            var channelLinkElement = document.createElement('a');
-            channelLinkElement.className = 'ytAttributedStringLink ytAttributedStringLinkCallToActionColor ytAttributedStringLinkInheritColor filmot_c_link';
-            channelLinkElement.setAttribute('tabindex', '0');
-            channelLinkElement.setAttribute('force-new-state', 'true');
-            channelLinkElement.href = 'https://www.youtube.com/channel/' + meta.channelid;
-            channelLinkElement.textContent = meta.channelname;
-
-            if (darkMode == 1) {
-                channelLinkElement.style.color = darkModeLinkColor;
-            }
-
-            channelSpanInner.appendChild(channelLinkElement);
-            channelSpanOuter.appendChild(channelSpanInner);
-            channelRow.appendChild(channelSpanOuter);
-
-            metaViewModel.prepend(channelRow);
-
-            // 3. Handle New Image/Thumbnail Structure via createElement
-            item.find(".filmot_newimg").remove();
-
-            var newThumbElement = document.createElement('img');
-            newThumbElement.id = 'filmot_newimg';
-            newThumbElement.className = 'ytCoreImageHost ytCoreImageFillParentHeight ytCoreImageFillParentWidth ytCoreImageContentModeScaleAspectFill ytCoreImageLoaded filmot_newimg';
-            newThumbElement.alt = '';
-            newThumbElement.src = 'https://filmot.com/vi/' + meta.id + '/default.jpg';
-            newThumbElement.title = escapedTitle;
-            newThumbElement.onclick = function(event) {
-                prompt('Full Title', escapedTitle);
-                event.stopPropagation();
-                return false;
-            };
-
-            var thumbContainer = item.find(".ytThumbnailViewModelImage");
-            if(thumbContainer.length) {
-                 thumbContainer[0].appendChild(newThumbElement);
-            }
-
-            item.find(".ytThumbnailViewModelImage img.ytCoreImageHost").not(".filmot_newimg").addClass("filmot_hide").hide();
-
-            // 4. Add Filmot button on the far right of the Title Section
-            let filmotButtonJQ = item.find("a#button-view-filmot");
-            if (filmotButtonJQ.length) {
-                // Button already exists, just update the URL
-                filmotButtonJQ.attr("href", "https://filmot.com/video/" + meta.id);
-            } else {
-                var filmotAnchor = document.createElement('a');
-                filmotAnchor.id = "button-view-filmot";
-                filmotAnchor.className = "filmot_button";
-                filmotAnchor.href = "https://filmot.com/video/" + meta.id;
-                filmotAnchor.target = "_blank";
-                filmotAnchor.title = "View on Filmot";
-
-                // Explicit styles to structure it on the far right of the title row
-                filmotAnchor.style.float = "right";
-                filmotAnchor.style.marginLeft = "10px";
-                filmotAnchor.style.backgroundColor = "#065fd4"; // YouTube Active Blue
-                filmotAnchor.style.color = "#ffffff";
-                filmotAnchor.style.padding = "2px 8px";
-                filmotAnchor.style.borderRadius = "4px";
-                filmotAnchor.style.display = "inline-flex";
-                filmotAnchor.style.alignItems = "center";
-                filmotAnchor.style.fontFamily = "Roboto, Arial, sans-serif";
-                filmotAnchor.style.fontSize = "12px";
-                filmotAnchor.style.fontWeight = "bold";
-                filmotAnchor.style.textDecoration = "none";
-                filmotAnchor.style.cursor = "pointer";
-
-                var icon = document.createElement('img');
-                icon.src = "https://www.google.com/s2/favicons?domain=filmot.com";
-                icon.style.marginRight = "4px";
-                icon.style.width = "12px";
-                icon.style.height = "12px";
-
-                var textSpan = document.createElement('span');
-                textSpan.innerText = "Filmot";
-                textSpan.style.lineHeight = "1";
-
-                filmotAnchor.appendChild(icon);
-                filmotAnchor.appendChild(textSpan);
-
-                // Prepend to the title container row to sit alongside the link and IA button
-                if (titleItemContainer.length) {
-                    titleItemContainer.css("display", "block");
-                    titleItemContainer.prepend($(filmotAnchor));
-                }
-            }
-        });
+        container.appendChild(panel);
     }
+
     $("#TitleRestoredBtn").text(Object.keys(window.RecoveredIDS).length + " of " + Object.keys(window.DetectedIDS).length + " restored");
+
 }
 
-
 function processClick(format, nTry) {
+    /*
+    processClick:
+    Accepts either a list of removed/unavailable video IDs, or a single removed/unavailable ID
+    Queries the Filmot API on said video(s) to fetch JSON result containing missing video info.
+    Passes JSON result to 1 of 2 functions depending on whether it is a playlist or single video page.
+    format: 1 = list of video IDs, 2 = single video ID
+    nTry: desired number of Filmot API retries
+    */
+
+    console.debug('[Filmot] [DEBUG] processClick initiated.')
+
     var maxTries = 2;
     var apiURL = 'https://filmot.com/api/getvideos?key=md5paNgdbaeudounjp39&id=' + window.deletedIDs;
 
     fetch(apiURL)
         .then(response => {
         if (!response.ok) {
-            throw new Error('Network response was not ok');
+            console.error("[Filmot] Network response failure (Filmot API).");
+            throw new Error('[Filmot] Network response failure (Filmot API).');
         }
         return response.json();
     })
         .then(data => {
         if (format == 1) {
-            processJSONResultFullView(data, format);
-            processJSONResultFullViewOldFormat(data, format);
+            console.debug('[Filmot] [DEBUG] Successfully received data from Filmot API. Calling playlist page processing.')
+            processJSONResultFullView(data, format); // Pass json list of video info to playlist page handler.
         } else if (format == 2) {
-            processJSONResultSingleVideo(data, format);
+            console.debug('[Filmot] [DEBUG] Successfully received data from Filmot API. Calling single video page processing.')
+            processJSONResultSingleVideo(data, format); // Pass json list of video info to single video page handler.
+        }
+        else {
+            console.error('[Filmot] Internal error: invalid video format in processClick.')
         }
     })
         .catch(error => {
         if (nTry >= maxTries) {
-            console.error("filmot fetch error:", error);
-            console.error("filmot fetch message:", error.message);
-            console.error("filmot fetch stack:", error.stack);
+            console.error("[Filmot] filmot fetch error:", error);
+            console.error("[Filmot] filmot fetch message:", error.message);
+            console.error("[Filmot] filmot fetch stack:", error.stack);
 
             reportAJAXError(apiURL + " " + JSON.stringify(error));
             return;
         }
-        processClick(format, nTry + 1);
+        processClick(format, nTry + 1); // Retry
     })
         .finally(() => {
         // This function will be called regardless of success or failure
